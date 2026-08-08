@@ -336,7 +336,15 @@ async function skrivViaProxy<T>(
       headere: {
         // Hodet, ikke spørrestrengen: en URL havner i tilgangslogger.
         "x-heatcheck-nokkel": proxy.hemmelighet,
-        "content-type": "application/json",
+        //
+        // INGEN `content-type` HER. `sendJson` setter `Content-Type` selv, og
+        // et objekt kan bære begge skrivemåtene samtidig — JS-objekter er
+        // case-sensitive, `Headers` er det ikke. Da slås de sammen til
+        // «application/json, application/json», som er en UGYLDIG media type.
+        //
+        // Serveren kaster da på `req.body` før den rekker å lese noe, og svarer
+        // 500 uten å si hvorfor. Målt 8. august: hele den første ekte kjøringen
+        // gikk tapt på nettopp dette.
       },
     });
     if (siste.utfall !== "ok") return siste;
