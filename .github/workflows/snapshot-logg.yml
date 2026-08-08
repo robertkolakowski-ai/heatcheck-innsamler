@@ -1,0 +1,91 @@
+name: Snapshot-logg — alle byer, begge markeder
+
+# Henter værvarsler fra Open-Meteo og bøttepriser fra Polymarkets Gamma-API for
+# 21 byer, og skriver dem til Postgres. Den tolker ingenting og bestemmer
+# ingenting — den skriver ned hva modellene sa og hva bøttene kostet.
+#
+# HVORFOR DEN HASTER. Open-Meteo gir ikke ut gamle varsler, og Gamma gir ikke ut
+# gamle priser. Alt som ikke lagres i det øyeblikket det finnes, kan ikke hentes
+# inn igjen — ikke for penger, ikke med et bedre skript. Hver time uten denne
+# jobben er en time data som er borte for godt.
+#
+# ── `--bare-base` MÅ STÅ ──────────────────────────────────────────────────
+#
+# Uten det flagget skriver loggeren en redusert form til
+# `data/snapshots/<dato>.ndjson`. I dette repoet ville hver lesning dermed blitt
+# publisert automatisk. Dataene hører hjemme i Postgres, som er privat.
+#
+# Derfor er det heller ingen commit-steg her, og `permissions` er `contents:
+# read`: det finnes ingenting å committe, og en jobb med skrivetilgang som ikke
+# trenger den skal ikke stå.
+#
+# ── HVORFOR IKKE `--minst-minutter` ───────────────────────────────────────
+#
+# Loggeren har en vakt som hopper over kjøringen hvis forrige runde er for fersk.
+# Den leser dagsfilen for å vite når det var. Med `--bare-base` skrives filen
+# aldri, så vakten vet aldri noe og henter alltid — den ville stått her som et
+# vern som ikke finnes, og det er verre enn ikke å ha den. Kadensen styres i
+# stedet utenfra, se under.
+
+on:
+  schedule:
+    # RESERVE, ikke hovedkilden. Frekvensen drives utenfra: en cron-tjeneste
+    # pirker et endepunkt som gjør `workflow_dispatch` mot denne filen. En
+    # dispatch køes som et vanlig API-kall, mens PLANLAGTE kjøringer på et travelt
+    # repo hoppes over uten beskjed — målt: fire ganger så mange cron-tidspunkt ga
+    # bare 1,4 ganger så mange kjøringer.
+    #
+    # Faller cron-tjenesten bort, er én lesning i timen langt bedre enn null, og
+    # det er nøyaktig hva reserven er til for.
+    #
+    # Minuttet ligger unna hel og halv time, som er plattformens travleste.
+    - cron: "22 * * * *"
+  workflow_dispatch: {}
+
+# Leser bare sin egen utsjekk. Ingenting skrives tilbake til repoet.
+permissions:
+  contents: read
+
+concurrency:
+  group: snapshot-logg
+  cancel-in-progress: false
+
+jobs:
+  snapshots:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          # Kjøres direkte med Nodes --experimental-strip-types. Ingen
+          # avhengigheter, ingen package.json, ingen npm install: koden
+          # importerer bare `node:`-innebygde moduler.
+          node-version: "22"
+
+      - name: Hent og lagre denne timens snapshots
+        # To dager fram. Markedene listes typisk 1–2 dager i forveien, så dette
+        # fanger et marked fra det øyeblikket det dukker opp.
+        run: >-
+          node --experimental-strip-types runtime/snapshot-logg.ts --dager 2
+          --bare-base
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+
+          # ── NØKKELEN HER ER IKKE `service_role` ──────────────────────────
+          #
+          # `service_role` går utenom RLS og kan lese og endre alt i basen. Den
+          # skal aldri ligge i et offentlig repo, uansett hvor godt secrets er
+          # skjermet.
+          #
+          # Secreten under bærer en egen rolle som kan nøyaktig én ting: legge
+          # til og oppdatere rader i de to snapshot-tabellene. Den kan ikke
+          # slette noe og når ingen andre tabeller.
+          #
+          # MERK NAVNEBYTTET. Koden leser miljøvariabelen
+          # `SUPABASE_SERVICE_ROLE_KEY` — et navn som beskriver en rolle nøkkelen
+          # ikke har. Secreten heter det den ER; variabelen heter det koden LETER
+          # ETTER, og linja under kobler dem. (Secret-navn i GitHub kan bare
+          # inneholde bokstaver a–z, tall og understrek — derfor `SKRIVENOKKEL`
+          # uten Ø.)
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SKRIVENOKKEL }}
