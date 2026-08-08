@@ -70,22 +70,21 @@ jobs:
           node --experimental-strip-types runtime/snapshot-logg.ts --dager 2
           --bare-base
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-
-          # ── NØKKELEN HER ER IKKE `service_role` ──────────────────────────
+          # ── DETTE REPOET HAR INGEN DATABASENØKKEL ────────────────────────
           #
-          # `service_role` går utenom RLS og kan lese og endre alt i basen. Den
-          # skal aldri ligge i et offentlig repo, uansett hvor godt secrets er
-          # skjermet.
+          # Radene sendes til `/api/snapshot-trigger`, som holder databasenøkkelen i
+          # Vercels servermiljø og validerer hver rad mot skjemaet før den
+          # skriver. Dette repoet har bare en tilfeldig hemmelighet, og den kan
+          # ikke brukes til noe annet enn å legge til snapshot-rader.
           #
-          # Secreten under bærer en egen rolle som kan nøyaktig én ting: legge
-          # til og oppdatere rader i de to snapshot-tabellene. Den kan ikke
-          # slette noe og når ingen andre tabeller.
+          # HVORFOR IKKE EN DATABASENØKKEL DIREKTE. Planen var en egen
+          # Postgres-rolle med `insert` bare på snapshot-tabellene, båret av en
+          # JWT vi signerte selv. Den falt: Supabase-prosjektet er gått over til
+          # asymmetriske signeringsnøkler, og den private nøkkelen holdes av
+          # Supabase. Egne tokens kan altså ikke signeres i det hele tatt.
           #
-          # MERK NAVNEBYTTET. Koden leser miljøvariabelen
-          # `SUPABASE_SERVICE_ROLE_KEY` — et navn som beskriver en rolle nøkkelen
-          # ikke har. Secreten heter det den ER; variabelen heter det koden LETER
-          # ETTER, og linja under kobler dem. (Secret-navn i GitHub kan bare
-          # inneholde bokstaver a–z, tall og understrek — derfor `SKRIVENOKKEL`
-          # uten Ø.)
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SKRIVENOKKEL }}
+          # Ruta er strengere enn rollen ville vært. En databaserolle kan
+          # begrense HVILKE TABELLER som skrives, men ikke se på innholdet.
+          # Ruta gjør begge deler.
+          SNAPSHOT_PROXY_URL: ${{ secrets.SNAPSHOT_PROXY_URL }}
+          SNAPSHOT_PROXY_SECRET: ${{ secrets.SNAPSHOT_PROXY_SECRET }}

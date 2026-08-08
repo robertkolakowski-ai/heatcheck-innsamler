@@ -43,6 +43,26 @@
 
 import { sendJson, type HentOpsjoner, type Svar } from "./hent.ts";
 
+/**
+ * PROXY-MODUS — når innsamleren ikke kan holde en databasenøkkel.
+ *
+ * Planen for det åpne repoet var en egen Postgres-rolle båret av en JWT vi
+ * signerte selv. Den planen falt: prosjektet roterte til ASYMMETRISKE
+ * signeringsnøkler (ECC P-256), og den private nøkkelen holdes av Supabase.
+ * Egne tokens kan altså ikke signeres, uansett hvilken rolle de skulle bære.
+ *
+ * I stedet POSTer innsamleren radene til `/api/snapshot-inn`, som holder
+ * service_role i Vercels servermiljø og validerer hver rad mot skjemaet før
+ * den skriver. Det åpne repoet får bare en tilfeldig hemmelighet.
+ *
+ * Se `docs/DELING.md` og kommentaren øverst i `Weathermarket/api/snapshot-inn.js`.
+ */
+export interface ProxyOppsett {
+  /** Full URL til ruta, f.eks. `https://…/api/snapshot-inn`. */
+  readonly url: string;
+  readonly hemmelighet: string;
+}
+
 export interface BaseOppsett {
   /** `https://<prosjekt>.supabase.co` — uten skråstrek på slutten. */
   readonly url: string;
@@ -50,6 +70,14 @@ export interface BaseOppsett {
   readonly nøkkel: string;
   /** Postgres-skjema. Se `STANDARD_SKJEMA`. */
   readonly skjema: string;
+  /**
+   * Satt: skriv via ruta i stedet for rett på PostgREST.
+   *
+   * Ligger på samme oppsett framfor å være en egen type, nettopp for at
+   * `snapshot-logg.ts` ikke skal trenge å vite hvilken vei radene går.
+   * Kallstedet er identisk i begge moduser; valget tas her.
+   */
+  readonly proxy?: ProxyOppsett;
 }
 
 /**
@@ -71,6 +99,8 @@ export const MILJØ = {
   url: "SUPABASE_URL",
   nøkkel: "SUPABASE_SERVICE_ROLE_KEY",
   skjema: "SUPABASE_SCHEMA",
+  proxyUrl: "SNAPSHOT_PROXY_URL",
+  proxyHemmelighet: "SNAPSHOT_PROXY_SECRET",
 } as const;
 
 export type OppsettResultat =
@@ -89,6 +119,45 @@ export type OppsettResultat =
  */
 
 export function lesOppsett(env: Record<string, string | undefined>): OppsettResultat {
+  /*
+   * PROXY-MODUS SJEKKES FØRST, og det er et valg.
+   *
+   * Et repo som har proxy-variablene satt, har dem satt fordi det IKKE skal
+   * holde en databasenøkkel. Ville vi latt SUPABASE_*-variablene vinne når
+   * begge finnes, ville en glemt variabel i det åpne repoet stille sendt
+   * skrivingen rett på basen igjen — altså den ene tilstanden hele delingen
+   * finnes for å unngå, og den ville sett ut som at alt virket.
+   */
+  const proxyUrl = env[MILJØ.proxyUrl]?.trim();
+  const proxyHemmelighet = env[MILJØ.proxyHemmelighet]?.trim();
+  if (proxyUrl || proxyHemmelighet) {
+    const savnet = [
+      ...(proxyUrl ? [] : [MILJØ.proxyUrl]),
+      ...(proxyHemmelighet ? [] : [MILJØ.proxyHemmelighet]),
+    ];
+    // «Delvis satt opp» er en annen feil enn «ikke satt opp», med en annen
+    // fiks. Samme valg som i rutene, og av samme grunn.
+    if (savnet.length) return { status: "mangler", navn: savnet };
+
+    if (!/^https:\/\/[^/]+\/.+/.test(proxyUrl!)) {
+      return {
+        status: "ugyldig",
+        grunn: `${MILJØ.proxyUrl} skal være hele URL-en til ruta, ` +
+          `f.eks. «https://…/api/snapshot-inn». Fikk «${proxyUrl}».`,
+      };
+    }
+    return {
+      status: "ok",
+      oppsett: {
+        // Ubrukt i proxy-modus, men feltene er påkrevd i typen. Tomme strenger
+        // er tryggere enn plausible plassholdere: tar noen dem i bruk ved et
+        // uhell, feiler det med én gang i stedet for å peke et sted som finnes.
+        url: "", nøkkel: "", skjema: STANDARD_SKJEMA,
+        proxy: { url: proxyUrl!, hemmelighet: proxyHemmelighet! },
+      },
+    };
+  }
+
   const url = env[MILJØ.url]?.trim();
   const nøkkel = env[MILJØ.nøkkel]?.trim();
 
@@ -246,11 +315,41 @@ export async function skrivIPorsjoner<T>(
   return siste;
 }
 
+/**
+ * Send en porsjonert bunke til `/api/snapshot-inn` i stedet for til PostgREST.
+ *
+ * Ruta tar imot `{ prognoser: [...] }` eller `{ priser: [...] }` og gjør selve
+ * innsettingen med service_role. Porsjoneringen beholdes: taket på ruta er
+ * 5 000 rader per kall, og en feil skal koste én porsjon, ikke hele timen.
+ */
+async function skrivViaProxy<T>(
+  rader: readonly T[],
+  felt: "prognoser" | "priser",
+  proxy: ProxyOppsett,
+  opt: HentOpsjoner,
+): Promise<Svar<unknown>> {
+  if (!rader.length) return { utfall: "ok", data: null, hentetMs: opt.nåMs, fraBuffer: false };
+  let siste: Svar<unknown> = { utfall: "ok", data: null, hentetMs: opt.nåMs, fraBuffer: false };
+  for (let i = 0; i < rader.length; i += PORSJON) {
+    siste = await sendJson(proxy.url, { [felt]: rader.slice(i, i + PORSJON) }, {
+      ...opt,
+      headere: {
+        // Hodet, ikke spørrestrengen: en URL havner i tilgangslogger.
+        "x-heatcheck-nokkel": proxy.hemmelighet,
+        "content-type": "application/json",
+      },
+    });
+    if (siste.utfall !== "ok") return siste;
+  }
+  return siste;
+}
+
 export function skrivPrognoseSnapshots(
   rader: readonly PrognoseSnapshot[],
   oppsett: BaseOppsett,
   opt: HentOpsjoner,
 ): Promise<Svar<unknown>> {
+  if (oppsett.proxy) return skrivViaProxy(rader, "prognoser", oppsett.proxy, opt);
   return skrivIPorsjoner(
     rader,
     `${oppsett.url}/rest/v1/forecast_snapshots`
@@ -264,6 +363,7 @@ export function skrivPrisSnapshots(
   oppsett: BaseOppsett,
   opt: HentOpsjoner,
 ): Promise<Svar<unknown>> {
+  if (oppsett.proxy) return skrivViaProxy(rader, "priser", oppsett.proxy, opt);
   return skrivIPorsjoner(
     rader,
     `${oppsett.url}/rest/v1/price_snapshots`
