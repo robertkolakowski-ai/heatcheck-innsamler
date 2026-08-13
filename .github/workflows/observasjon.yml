@@ -12,18 +12,28 @@ name: Observasjoner — METAR fra oppgjørsstasjonen
 #
 # Hver time uten denne loggen er en time som ikke kan gjenskapes.
 #
-# ── ⚠ DENNE JOBBEN HØRER HJEMME I DET ÅPNE INNSAMLER-REPOET ──────────────────
+# ── HVORFOR JOBBEN STÅR HER OG IKKE I BESLUTNINGSREPOET ──────────────────────
 #
-# `docs/DELING.md` regner det ut: det private repoet bruker allerede ~222
-# kjøringer i døgnet mot et gratistak som holder i under fem dager, og
-# 6. august stanset alt. En jobb som går hvert femte minutt i dagslys er
-# ~150 kjøringer til. Offentlige repo har ubegrensede Actions-minutter.
+# Fordi den ikke hadde vært råd å ha der. `DELING.md` regner det ut i det
+# private repoet: ~222 kjøringer i døgnet mot et gratistak som holder i under
+# fem dager, og 6. august stanset alt. Denne jobben er ~150 kjøringer til.
+# Offentlige repo har ubegrensede Actions-minutter, og det er hele grunnen til
+# at en femminutters poll er mulig i det hele tatt.
 #
-# Filene den trenger står i `docs/apent-repo/OPPSKRIFT.md` trinn 2.
-# `runtime/test/deling.test.ts` følger importgrafen herfra og feiler hvis noe
-# fra beslutningslaget sniker seg inn.
+# Det private repoets kopi ble deaktivert 13. august; den er ikke slettet,
+# fordi filen er kilden `OPPSKRIFT.md` kopierer fra. `deling.test.ts` følger
+# importgrafen herfra og feiler hvis noe fra beslutningslaget sniker seg inn.
 #
-# Til den er flyttet, står cronen under BEVISST GLISEN — se kommentaren der.
+# ── ÉN RUNDE I TIMEN SPØR BEGGE KILDER ───────────────────────────────────────
+#
+# Ingen ekstra jobb og ingen ekstra cron-linje: loggeren avgjør det selv på
+# minuttet, se `kryssrunde()` i runtime/observasjon-logg.ts. Grunnen er at
+# hentingen ellers stopper på første kilde som svarer, og AWC svarer praktisk
+# talt alltid — da hadde tabellen bare inneholdt én kilde, og «to kilder kan
+# være uenige uten å overskrive hverandre» hadde vært en egenskap uten data.
+#
+# En reserve som er nede under en kryssrunde gir en `feil`-linje i loggen, ikke
+# en rød jobb: `hentFra` kaster aldri, og primærinnsamlingen er alt skrevet.
 
 on:
   schedule:
