@@ -70,8 +70,8 @@ import { ENSEMBLE_NØKLER } from "../core/src/observasjon.ts";
 // prediksjoner, fasit og skyggeordrer; ingenting av det hører hjemme der
 // denne jobben kan komme til å kjøre. Se `docs/DELING.md`.
 import {
-  lesOppsett, skrivPrisSnapshots, skrivPrognoseSnapshots,
-  type PrisSnapshot, type PrognoseSnapshot,
+  lesOppsett, skrivKjøringer, skrivPrisSnapshots, skrivPrognoseSnapshots,
+  type KjøringSnapshot, type PrisSnapshot, type PrognoseSnapshot,
 } from "./base-snapshots.ts";
 import type { HentOpsjoner } from "./hent.ts";
 
@@ -276,12 +276,14 @@ async function main(): Promise<void> {
 
   const prognoser: PrognoseSnapshot[] = runder.flatMap((r) => [...r.prognoser]);
   const priser: PrisSnapshot[] = runder.flatMap((r) => [...r.priser]);
+  const kjøringer: KjøringSnapshot[] = runder.flatMap((r) => [...r.kjøringer]);
   const notater = runder.flatMap((r) => [...r.notater]);
 
   const medMarked = notater.filter((n) => n.marked === "ok").length;
   const tomme = notater.filter((n) => n.marked === "tomt").length;
   const feilet = notater.filter((n) => n.marked === "feil").length;
-  console.log(`[snapshots] ${prognoser.length} prognoserader · ${priser.length} prisrader`);
+  console.log(`[snapshots] ${prognoser.length} prognoserader · ${priser.length} prisrader` +
+              (kjøringer.length ? ` · ${kjøringer.length} timesbaner` : ""));
   console.log(`[snapshots] marked: ${medMarked} notert · ${tomme} ikke notert · ${feilet} feilet`);
   // «Ikke notert» er normalt: lowest finnes bare for London, og highest listes
   // typisk 1–2 dager fram. «Feilet» er det ikke, og skal skille seg ut.
@@ -327,7 +329,15 @@ async function main(): Promise<void> {
   // formen trygt, og jobben blir ikke rød for en tapt Postgres-runde alene.
   const a = await skrivPrognoseSnapshots(prognoser, oppsett.oppsett, opt);
   const b = await skrivPrisSnapshots(priser, oppsett.oppsett, opt);
-  for (const [navn, svar] of [["prognoser", a], ["priser", b]] as const) {
+  // Timesbanene skrives bare når det finnes noen. En tom skriving ville
+  // meldt «kjøringer skrevet» på en runde der ingen bane ble hentet, og det
+  // er nettopp forskjellen mellom «hentet ingenting» og «hentet ikke».
+  const c = kjøringer.length ? await skrivKjøringer(kjøringer, oppsett.oppsett, opt) : null;
+
+  const skrivinger: Array<readonly [string, typeof a]> = [["prognoser", a], ["priser", b]];
+  if (c) skrivinger.push(["timesbaner", c]);
+
+  for (const [navn, svar] of skrivinger) {
     if (svar.utfall === "ok") console.log(`[snapshots] base: ${navn} skrevet.`);
     else {
       console.error(`[snapshots] base: ${navn} FEILET — ${"grunn" in svar ? svar.grunn : svar.utfall}`);

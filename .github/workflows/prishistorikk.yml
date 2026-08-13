@@ -1,0 +1,62 @@
+name: Prishistorikk — minuttpriser i etterkant
+
+# S1.3. Henter CLOBs minuttoppløste prishistorikk for gårsdagens marked.
+#
+# ── HVORFOR DENNE IKKE ER EN POLLER ──────────────────────────────────────────
+#
+# Alt annet i S1 haster fordi det ikke kan hentes inn igjen. Dette gjør det
+# motsatte: CLOB serverer historikken i ETTERKANT, så én kjøring i døgnet
+# etter at markedet har lukket henter hele dagen i ett. ~20 kall i døgnet.
+#
+# Den kompletterer `price_snapshots` og erstatter den ikke. Snapshot-tabellen
+# er VÅR egen serie med et hentetidspunkt vi kjenner, og den er ærligst for
+# look-ahead. Denne er finere oppløst og hentet i ettertid — en backtest som
+# bruker den må vite det.
+#
+# Hører hjemme i det åpne innsamler-repoet, som resten av S1. Se
+# `docs/DELING.md` og `docs/apent-repo/OPPSKRIFT.md`.
+
+on:
+  schedule:
+    # 23:30 UTC. Markedet lukker 22:00, så historikken er komplett — og det er
+    # unna «Fasit og ROI-test» (23:45) og skyggeoppgjøret (23:55), som begge
+    # trenger runnere i samme vindu.
+    - cron: "30 23 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prishistorikk
+  cancel-in-progress: false
+
+jobs:
+  hent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Hent gårsdagens minuttpriser
+        # `--dager 2` og ikke 1: en jobb som ikke fikk runner i går skal ta
+        # igjen etterslepet av seg selv. Uniknøkkelen (token, ts, source) gjør
+        # at den ekstra dagen ikke koster noe utover kallene.
+        # ── DETTE REPOET HAR INGEN DATABASENØKKEL ────────────────────────
+        #
+        # Radene sendes til `/api/snapshot-trigger`, som holder databasenøkkelen
+        # i Vercels servermiljø og validerer hver rad mot skjemaet før den
+        # skriver. Dette repoet har bare en tilfeldig hemmelighet, og den kan
+        # ikke brukes til noe annet enn å legge til rader i de hvitlistede
+        # tabellene.
+        #
+        # Samme oppsett som `snapshot-logg.yml`, og av samme grunn: dette repoet
+        # er OFFENTLIG. En service_role-nøkkel i secrets her ville vært én
+        # feilkonfigurert arbeidsflyt unna å kunne leses ut.
+        env:
+          SNAPSHOT_PROXY_URL: ${{ secrets.SNAPSHOT_PROXY_URL }}
+          SNAPSHOT_PROXY_SECRET: ${{ secrets.SNAPSHOT_PROXY_SECRET }}
+        run: node --experimental-strip-types runtime/prishistorikk.ts --dager 2

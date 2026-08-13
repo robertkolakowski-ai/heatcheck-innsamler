@@ -3,6 +3,8 @@
  * Selve hentingen (og alt som kan feile mot nettet) hører hjemme i fase 3.
  */
 
+import { fingeravtrykk, kanonisk } from "./avtrykk.ts";
+
 export interface Bøtte {
   /** Heltallsgraden bøtta gjelder, tolket fra spørsmålsteksten. */
   readonly grad: number;
@@ -112,10 +114,69 @@ export interface FullBøtte {
   readonly noToken: string | null;
 }
 
+/**
+ * HVA MARKEDET SIER AT DET GJØR OPP PÅ.
+ *
+ * ── Hullet dette lukker ───────────────────────────────────────────────────
+ *
+ * Hele systemet hviler på at «Highest temperature in London» gjøres opp på
+ * London City Airport. `STASJON` i `observasjon.ts` står på EGLC-koordinatene,
+ * modellene spørres der, og `daily_prediction_log.py` henter METAR derfra.
+ *
+ * Ingenting har lest hva markedet SELV oppgir. Byttet Polymarket
+ * oppgjørsstasjon i morgen — til Heathrow, til en annen kilde, til en annen
+ * enhet — ville ingen linje kode og ingen test merket det. Prognosen ville
+ * fortsatt vært for EGLC, og den ville fortsatt sett riktig ut.
+ *
+ * Dette er den billigste harde porten i hele spesifikasjonen: den koster ett
+ * felt i et svar vi allerede henter.
+ *
+ * ── Hvorfor teksten normaliseres før den avtrykkes ────────────────────────
+ *
+ * Oppgjørsteksten inneholder måldatoen — «…on August 6, 2026». Et rått avtrykk
+ * ville derfor skiftet HVER ENESTE DAG, og et varsel som roper daglig blir
+ * slått av innen uka er omme. `normalisertOppgjørstekst` fjerner datoen og
+ * slår sammen mellomrom, og gjør ingenting annet: en terskel, et stasjonsnavn
+ * eller en enhet som endrer seg skal fortsatt flytte avtrykket.
+ */
+export interface Oppgjørsregel {
+  /**
+   * `resolutionSource` — som regel en URL. Det er DENNE som navngir stasjonen,
+   * og derfor den viktigste halvdelen. Null når gamma ikke oppgir noe.
+   */
+  readonly kilde: string | null;
+  /** Regelteksten, uendret og udatonormalisert. Null når feltet mangler. */
+  readonly tekst: string | null;
+  /**
+   * Hvilket felt teksten ble funnet i.
+   *
+   * Står her fordi feltnavnet ikke er verifisert mot et ekte gamma-svar — se
+   * `OPPGJØRSFELT`. Flytter Polymarket teksten til et annet felt, skal det
+   * være LESBART at den flyttet, ikke se ut som at teksten forsvant.
+   */
+  readonly felt: string | null;
+  /** Avtrykk over kilde + normalisert tekst. Null når begge mangler. */
+  readonly avtrykk: string | null;
+}
+
+/**
+ * «Vi vet ingenting om oppgjørsregelen.»
+ *
+ * Finnes som en navngitt konstant fordi et `FullMarked` bygges for hånd flere
+ * steder — i tester, og i `etterprov.ts` som gjenskaper markeder fra lagrede
+ * snapshots der teksten aldri ble lagret. Uten den ville hvert av de stedene
+ * skrevet sitt eget objekt med fire nuller, og fire kopier av «ingenting» er
+ * fire steder å ta feil.
+ */
+export const INGEN_OPPGJØRSREGEL: Oppgjørsregel =
+  { kilde: null, tekst: null, felt: null, avtrykk: null };
+
 export interface FullMarked {
   readonly slug: string | null;
   readonly enhet: "celsius" | "fahrenheit";
   readonly bøtter: readonly FullBøtte[];
+  /** Hva markedet oppgir at det gjør opp på. Aldri null — feltene inni er det. */
+  readonly oppgjør: Oppgjørsregel;
 }
 
 /**
@@ -173,6 +234,91 @@ function tokener(m: Record<string, unknown>): { yesToken: string | null; noToken
   return { yesToken: finn("yes", 0), noToken: finn("no", 1) };
 }
 
+/**
+ * Feltene oppgjørsteksten kan ligge i, i den rekkefølgen de prøves.
+ *
+ * ⚠ IKKE VERIFISERT MOT ET EKTE GAMMA-SVAR. Utviklingsmiljøet har ingen
+ * utgående nettilgang, så listen er skrevet etter hva Polymarkets API
+ * dokumenterer og ikke etter hva det svarte. Derfor prøves FLERE navn, og
+ * derfor bæres `felt` videre på resultatet: står det et annet navn enn
+ * forventet i en lagret rad, er det en opplysning og ikke en feil.
+ *
+ * Første kjøring med nett avgjør hvilket som faktisk er i bruk.
+ * `tools/oppgjorskilde-check.mjs` skriver det ut.
+ */
+const OPPGJØRSFELT = ["resolutionSource", "description", "resolutionCriteria"] as const;
+
+/** Første ikke-tomme streng blant kandidatfeltene, med navnet den kom fra. */
+function førsteTekst(
+  kilder: ReadonlyArray<Record<string, unknown> | null | undefined>,
+  felt: readonly string[],
+): { verdi: string; felt: string } | null {
+  for (const f of felt) {
+    for (const k of kilder) {
+      const v = k?.[f];
+      if (typeof v === "string" && v.trim()) return { verdi: v.trim(), felt: f };
+    }
+  }
+  return null;
+}
+
+/**
+ * Teksten uten det som endrer seg av seg selv hver dag.
+ *
+ * Fjerner måldatoen i begge formene Polymarket bruker — «August 6, 2026» og
+ * «2026-08-06» — og slår sammen mellomrom. Ellers ville avtrykket skiftet
+ * daglig, og et endringsvarsel som roper daglig er et varsel ingen leser.
+ *
+ * Den fjerner IKKE frittstående tall. En terskel som går fra 30 til 31 °C er
+ * nøyaktig den endringen porten finnes for å fange, og en normalisering som
+ * er glad i å fjerne tall ville spist den.
+ *
+ * Små bokstaver: en kilde som skrives «Wunderground» i dag og «wunderground» i
+ * morgen er ikke en regelendring.
+ */
+export function normalisertOppgjørstekst(tekst: string): string {
+  const MÅNED = "(?:january|february|march|april|may|june|july|august|september|october|november|december)";
+  return tekst
+    .toLowerCase()
+    .replace(new RegExp(`${MÅNED}\\s+\\d{1,2}(?:st|nd|rd|th)?,?\\s+\\d{4}`, "g"), "<dato>")
+    .replace(new RegExp(`\\d{1,2}\\s+${MÅNED},?\\s+\\d{4}`, "g"), "<dato>")
+    .replace(/\d{4}-\d{2}-\d{2}/g, "<dato>")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Les oppgjørsregelen ut av eventet og dets markeder.
+ *
+ * Både eventnivået og markedsnivået prøves, i den rekkefølgen: teksten står
+ * normalt per marked, men gamma legger den av og til bare på eventet. Er
+ * markedene uenige med hverandre, vinner det første — og det er en tilstand
+ * `oppgjorskilde-check` skriver ut framfor å skjule, fordi to bøtter i samme
+ * marked med hver sin oppgjørsregel er noe helt annet enn et tynt marked.
+ */
+export function lesOppgjørsregel(
+  event: Record<string, unknown> | null | undefined,
+  markeder: ReadonlyArray<Record<string, unknown>>,
+): Oppgjørsregel {
+  const kilder = [event, ...markeder];
+  const kildeTreff = førsteTekst(kilder, ["resolutionSource"]);
+  const tekstTreff = førsteTekst(kilder, OPPGJØRSFELT.filter((f) => f !== "resolutionSource"));
+
+  const kilde = kildeTreff?.verdi ?? null;
+  const tekst = tekstTreff?.verdi ?? null;
+  if (kilde === null && tekst === null) return INGEN_OPPGJØRSREGEL;
+
+  return {
+    kilde,
+    tekst,
+    felt: tekstTreff?.felt ?? kildeTreff?.felt ?? null,
+    avtrykk: fingeravtrykk(kanonisk({
+      kilde: kilde === null ? null : kilde.toLowerCase(),
+      tekst: tekst === null ? null : normalisertOppgjørstekst(tekst),
+    })),
+  };
+}
+
 /** Hele bøttesettet med grenser, ask og bid. Null når eventet er tomt. */
 export function lesFulltMarked(svar: unknown): FullMarked | null {
   const liste = Array.isArray(svar) ? svar : null;
@@ -206,7 +352,15 @@ export function lesFulltMarked(svar: unknown): FullMarked | null {
   // Samme sortering som nettleseren: stigende på nedre grense, med den åpne
   // nedre enden først.
   bøtter.sort((a, b) => (a.lav ?? -Infinity) - (b.lav ?? -Infinity));
-  return { slug: event.slug ?? null, enhet, bøtter };
+  return {
+    slug: event.slug ?? null,
+    enhet,
+    bøtter,
+    oppgjør: lesOppgjørsregel(
+      event as Record<string, unknown>,
+      markeder as Array<Record<string, unknown>>,
+    ),
+  };
 }
 
 /**

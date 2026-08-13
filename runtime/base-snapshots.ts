@@ -322,9 +322,21 @@ export async function skrivIPorsjoner<T>(
  * innsettingen med service_role. Porsjoneringen beholdes: taket på ruta er
  * 5 000 rader per kall, og en feil skal koste én porsjon, ikke hele timen.
  */
+/**
+ * Tabellnavnene mottaksruta kjenner.
+ *
+ * MÅ holdes i takt med `TABELLER` i `Weathermarket/api/_mottak.js`. En skriver
+ * med et navn ruta ikke kjenner får «ukjent tabell» og mister runden, uten at
+ * noe annet blir rødt — og i proxy-modus er det den ENESTE veien dataene har.
+ *
+ * Unionen er navngitt og ikke skrevet ut på hvert kallsted nettopp for at det
+ * skal finnes ett sted å se etter når de to skal sammenliknes.
+ */
+export type ProxyFelt = "prognoser" | "priser" | "observasjoner" | "kjoringer" | "prishistorikk";
+
 async function skrivViaProxy<T>(
   rader: readonly T[],
-  felt: "prognoser" | "priser",
+  felt: ProxyFelt,
   proxy: ProxyOppsett,
   opt: HentOpsjoner,
 ): Promise<Svar<unknown>> {
@@ -376,6 +388,150 @@ export function skrivPrisSnapshots(
     rader,
     `${oppsett.url}/rest/v1/price_snapshots`
       + `?on_conflict=city,market_type,target_date,fetched_at,bucket_label`,
+    oppsett, opt,
+  );
+}
+
+/**
+ * Én rad i `<skjema>.forecast_runs` — ÉN MODELLKJØRING, ikke én henting.
+ *
+ * ── Hvorfor formen er slik ────────────────────────────────────────────────
+ *
+ * En flat tabell med én rad per (modell, time) ville gitt tusenvis av rader i
+ * døgnet for én by, og sprengt et gratisnivå på noen måneder.
+ *
+ * Men en modellkjøring er en HENDELSE: verdiene står helt stille mellom
+ * kjøringene. `fingerprint` er avtrykket av selve timesvektoren, den står i
+ * uniknøkkelen, og skrivingen bruker `merge-duplicates`. Da blir en runde der
+ * ingenting har endret seg en oppdatering av `last_seen_at` — og en runde der
+ * modellen har kjørt på nytt blir én ny rad.
+ *
+ * ── OG DET ER DERFOR `first_seen_at` ER MER ENN ET TIDSSTEMPEL ────────────
+ *
+ * Tidspunktet den FØRSTE raden med et nytt avtrykk ble sett, avgrenser når
+ * modellkjøringen ble tilgjengelig — sammen med forrige rads `first_seen_at`.
+ * Det er `forecast_initialization_time` som en MÅLING, i stedet for et felt vi
+ * håper leverandøren oppgir og ikke kan etterprøve.
+ *
+ * Uten det kan en backtest ikke skille «prognosen fantes kl. 10:00» fra
+ * «prognosen ble publisert 10:15 og vi hentet den 10:20». Den forskjellen er
+ * hele forskjellen på en etterprøving og en etterrasjonalisering.
+ *
+ * ── ⚠ `first_seen_at` SENDES ALDRI, OG DET ER IKKE EN FORGLEMMELSE ────────
+ *
+ * PostgREST skriver med `resolution=merge-duplicates`, som oppdaterer NØYAKTIG
+ * de kolonnene som ligger i kroppen. Sto `first_seen_at` der, ville hver eneste
+ * runde skrevet den til nå — og feltet som skal avgrense NÅR modellkjøringen
+ * kom ville i stedet blitt et nest siste `last_seen_at`. Målingen ville sett
+ * helt normal ut og vært verdiløs.
+ *
+ * Kolonnen har derfor `default now()` i skjemaet og står IKKE i denne typen.
+ * Den settes én gang, ved innsettingen, og røres aldri igjen.
+ */
+export interface KjøringSnapshot {
+  source: string;
+  city: string;
+  market_type: "highest" | "lowest";
+  target_date: string;
+  fingerprint: string;
+  /** Sendes hver runde. `first_seen_at` gjør IKKE det — se over. */
+  last_seen_at: string;
+  /** Time (UTC, ISO) → °C. Samme jsonb-idiom som `predictions.model_minima`. */
+  values: Record<string, number | null>;
+  daily_max: number | null;
+  time_of_max_utc: string | null;
+  unit: "celsius";
+}
+
+export function skrivKjøringer(
+  rader: readonly KjøringSnapshot[],
+  oppsett: BaseOppsett,
+  opt: HentOpsjoner,
+): Promise<Svar<unknown>> {
+  if (oppsett.proxy) return skrivViaProxy(rader, "kjoringer", oppsett.proxy, opt);
+  return skrivIPorsjoner(
+    rader,
+    `${oppsett.url}/rest/v1/forecast_runs`
+      + `?on_conflict=source,city,market_type,target_date,fingerprint`,
+    oppsett, opt,
+  );
+}
+
+/**
+ * Én rad i `<skjema>.observations` — én METAR fra én kilde.
+ *
+ * ── NØKKELEN ER DET SOM GJØR TETT POLLING TRYGT ───────────────────────────
+ *
+ * `(icao, source, obs_time_utc, report_type)`. Samme rapport hentet ti ganger
+ * blir én rad, og pollefrekvensen er dermed frikoblet fra radantallet:
+ * stasjonen sender rundt femti rapporter i døgnet uansett om vi spør hvert
+ * femte minutt eller hver halvtime.
+ *
+ * `source` er MED i nøkkelen med vilje. Henter vi fra to kilder, skal de kunne
+ * være uenige om samme observasjonstid og bli stående uenige — en uenighet som
+ * blir overskrevet er en uenighet ingen oppdager.
+ *
+ * `raw_metar` lagres alltid. Det er den ENESTE kolonnen som kan tolkes på nytt
+ * hvis vi finner ut at vi leste en gruppe feil, og den koster noen hundre bytes.
+ */
+export interface ObsSnapshot {
+  icao: string;
+  source: string;
+  obs_time_utc: string;
+  report_type: "METAR" | "SPECI";
+  temp_c: number | null;
+  dewpoint_c: number | null;
+  wind_kt: number | null;
+  wind_gust_kt: number | null;
+  wind_dir: number | null;
+  pressure_hpa: number | null;
+  auto: boolean;
+  corrected: boolean;
+  raw_metar: string;
+  fetched_at: string;
+}
+
+/**
+ * Én rad i `<skjema>.price_history` — ett minuttpunkt for én bøtte.
+ *
+ * Nøkkelen er `(token_id, ts_utc, source)`. Token og ikke bøtteetikett: det er
+ * tokenet CLOB serverer historikken for, og en etikett kan i prinsippet
+ * skrives om uten at markedet er et annet.
+ */
+export interface PrishistorikkSnapshot {
+  city: string;
+  market_type: "highest" | "lowest";
+  target_date: string;
+  token_id: string;
+  bucket_label: string;
+  ts_utc: string;
+  price: number;
+  source: string;
+}
+
+export function skrivPrishistorikk(
+  rader: readonly PrishistorikkSnapshot[],
+  oppsett: BaseOppsett,
+  opt: HentOpsjoner,
+): Promise<Svar<unknown>> {
+  if (oppsett.proxy) return skrivViaProxy(rader, "prishistorikk", oppsett.proxy, opt);
+  return skrivIPorsjoner(
+    rader,
+    `${oppsett.url}/rest/v1/price_history?on_conflict=token_id,ts_utc,source`,
+    oppsett, opt,
+  );
+}
+
+export function skrivObservasjoner(
+  rader: readonly ObsSnapshot[],
+  oppsett: BaseOppsett,
+  opt: HentOpsjoner,
+): Promise<Svar<unknown>> {
+  if (oppsett.proxy) return skrivViaProxy(rader, "observasjoner", oppsett.proxy, opt);
+  return skrivIPorsjoner(
+    rader,
+    `${oppsett.url}/rest/v1/observations`
+      + `?on_conflict=icao,source,obs_time_utc,report_type`,
     oppsett, opt,
   );
 }
