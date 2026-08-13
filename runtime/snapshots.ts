@@ -33,7 +33,8 @@ import { BYER, MARKEDSTYPER, byslug, type Markedstype } from "../core/src/byer.t
 // Se `docs/DELING.md`.
 import { ALLE_NØKLER, ENSEMBLE_NØKLER } from "../core/src/observasjon.ts";
 import { lesFulltMarked, type FullMarked } from "../core/src/market.ts";
-import type { PrisSnapshot, PrognoseSnapshot } from "./base-snapshots.ts";
+import { lesBane, serieFra, type Bane, type Timespunkt } from "../core/src/trajektorie.ts";
+import type { KjøringSnapshot, PrisSnapshot, PrognoseSnapshot } from "./base-snapshots.ts";
 import { Buffer, hentJson, medTak, type HentOpsjoner } from "./hent.ts";
 
 const OM = "https://api.open-meteo.com/v1/forecast";
@@ -63,6 +64,69 @@ export function urlPrognose(lat: number, lon: number, iso: string, type: Markeds
 
 export function urlMarked(by: string, type: Markedstype, iso: string): string {
   return `${GAMMA}?closed=false&limit=3&slug=${byslug(by, type, iso)}`;
+}
+
+/* ── timesbanen (S1.2) ──────────────────────────────────────────────────── */
+
+/**
+ * Hvilke (by, markedstype) som får timesbane hentet.
+ *
+ * ── Hvorfor ikke alle ─────────────────────────────────────────────────────
+ *
+ * Timesbanen er tolv modeller × ~24 timer per henting mot ett tall per modell
+ * i dag. For 21 byer × 2 typer × ~30 hentinger i døgnet blir det uholdbart
+ * både i kall og i lagring.
+ *
+ * Og verdien er ujevnt fordelt. For et marked der ytterpunktet settes om
+ * natta, er «når kommer toppen» nesten uinteressant — den kommer når den
+ * kommer, og ingen ser på. For dagens maksimum er det hele poenget: toppen
+ * settes mens observasjonene tikker inn, og «hvor lenge er det til» er tallet
+ * som avgjør om en observasjon i det hele tatt er relevant.
+ *
+ * Listen er derfor kort med vilje. Den er en liste, ikke en omskriving.
+ */
+export const BANE_MÅL: ReadonlyArray<{ by: string; type: Markedstype }> = [
+  { by: "london", type: "highest" },
+];
+
+export const harBane = (by: string, type: Markedstype): boolean =>
+  BANE_MÅL.some((m) => m.by === by && m.type === type);
+
+/**
+ * Timesbanen for alle modellene, i ett kall.
+ *
+ * `timezone=UTC` og ikke `auto`: banen skal kunne sammenliknes med
+ * observasjoner som er UTC, og en serie i lokal tid uten sone i strengen er
+ * nøyaktig den feilen `serieFra` finnes for å fange. DøgnGRENSEN regnes lokalt
+ * et annet sted (`metar.ts:dagsmaks`) — det er to ulike spørsmål.
+ */
+export function urlTimesbane(lat: number, lon: number, iso: string): string {
+  return `${OM}?latitude=${lat}&longitude=${lon}`
+    + `&start_date=${iso}&end_date=${iso}&hourly=temperature_2m`
+    + `&temperature_unit=celsius&timezone=UTC&models=${ALLE_NØKLER.join(",")}`;
+}
+
+/**
+ * Én bane per modell, ut av Open-Meteos samlesvar.
+ *
+ * Med flere modeller i ett kall suffikserer Open-Meteo feltnavnene:
+ * `temperature_2m_ecmwf_ifs025`. Med ÉN modell dropper den suffikset. Begge
+ * former leses, fordi et samlekall som faller tilbake til én modell ellers
+ * ville gitt tom bane uten at noe sa fra.
+ */
+export function lesTimesbaner(data: unknown, modeller: readonly string[]): Record<string, Timespunkt[]> {
+  const hourly = (data as { hourly?: Record<string, unknown> } | null)?.hourly;
+  if (!hourly) return {};
+  const tider = hourly.time;
+
+  const ut: Record<string, Timespunkt[]> = {};
+  for (const m of modeller) {
+    const verdier = hourly[`temperature_2m_${m}`]
+      ?? (modeller.length === 1 ? hourly.temperature_2m : undefined);
+    const serie = serieFra(tider, verdier);
+    if (serie.length) ut[m] = serie;
+  }
+  return ut;
 }
 
 /** Én verdi per modellnøkkel, med null for de som ikke svarte. */
@@ -160,15 +224,30 @@ export interface Markedsdel {
   readonly fullt: FullMarked | null;
   /** Modellverdiene som faktisk kom, uten null-radene. Grunnlag for spredning. */
   readonly verdier: readonly number[];
+  /**
+   * Timesbanen per modell, der den er hentet.
+   *
+   * VALGFRI, og det er en påstand og ikke en bekvemmelighet: en `Markedsdel`
+   * gjenskapt fra lagrede snapshots — slik `etterprov.ts` gjør — har genuint
+   * ingen timesbane, fordi den ikke ble lagret da runden ble tatt. Å tvinge
+   * fram et tomt objekt der ville sagt «vi hentet banen og den var tom», som
+   * er noe annet enn «vi hentet den ikke».
+   *
+   * Feltet finnes for at signal-laget skal kunne regne «timer til forventet
+   * maksimum» uten å hente noe på nytt.
+   */
+  readonly baner?: Readonly<Record<string, Bane>>;
 }
 
 export interface Runde {
   readonly prognoser: readonly PrognoseSnapshot[];
   readonly priser: readonly PrisSnapshot[];
+  /** Én rad per modellkjøring som ble sett denne runden. Tom uten timesbane. */
+  readonly kjøringer: readonly KjøringSnapshot[];
   /** Per (by, type): hva som skjedde. Til logglinja, ikke til basen. */
   readonly notater: ReadonlyArray<{
     by: string; type: Markedstype; modeller: number; bøtter: number;
-    marked: "ok" | "tomt" | "feil";
+    marked: "ok" | "tomt" | "feil"; baner: number;
   }>;
   /** Råmaterialet A1 trenger. Ingen ekstra nettverkskall. */
   readonly markeder: readonly Markedsdel[];
@@ -201,13 +280,20 @@ export async function hentRunde(opt: HentOpsjoner, r: RundeOpsjoner): Promise<Ru
   const deler = await medTak(jobber, TAK, async ({ by, type }) => {
     // `hentJson` setter selv nettleser-UA-en gamma krever, og eier retry,
     // timeout og buffer. Ingenting av det gjentas her.
-    const [pSvar, mSvar] = await Promise.all([
+    // Timesbanen hentes BARE der den er verdt kallene — se `BANE_MÅL`. For de
+    // øvrige er `bSvar` null, og alt under oppfører seg nøyaktig som før.
+    const [pSvar, mSvar, bSvar] = await Promise.all([
       hentJson(urlPrognose(by.lat, by.lon, r.iso, type), opt, tomPrognose, buffer),
       hentJson(urlMarked(by.slug, type, r.iso), opt, tomtMarked, buffer),
+      harBane(by.slug, type)
+        ? hentJson(urlTimesbane(by.lat, by.lon, r.iso), opt, tomTimesbane, buffer)
+        : Promise.resolve(null),
     ]);
 
     const prognoser: PrognoseSnapshot[] = [];
     const priser: PrisSnapshot[] = [];
+    const kjøringer: KjøringSnapshot[] = [];
+    const baner: Record<string, Bane> = {};
     let modellverdier: number[] = [];
     let fulltMarked: FullMarked | null = null;
 
@@ -233,6 +319,30 @@ export async function hentRunde(opt: HentOpsjoner, r: RundeOpsjoner): Promise<Ru
                        target_date: r.iso, fetched_at: stempel, value: median(gyldige), unit: "celsius" });
       prognoser.push({ source: "ensemble_mean", city: by.slug, market_type: type,
                        target_date: r.iso, fetched_at: stempel, value: snitt(gyldige), unit: "celsius" });
+    }
+
+    // ── timesbanen ─────────────────────────────────────────────────────────
+    //
+    // Additivt hele veien: feiler dette kallet, står prognosene og prisene
+    // som før. En ny måling som kan velte de to som allerede virker, er ikke
+    // en måling — det er en risiko.
+    if (bSvar?.utfall === "ok") {
+      const serier = lesTimesbaner(bSvar.data, ALLE_NØKLER);
+      for (const [kilde, serie] of Object.entries(serier)) {
+        const bane = lesBane(serie);
+        baner[kilde] = bane;
+        kjøringer.push({
+          source: kilde, city: by.slug, market_type: type, target_date: r.iso,
+          fingerprint: bane.avtrykk,
+          // `first_seen_at` sendes IKKE — se `KjøringSnapshot`. Basen setter
+          // den én gang, og det er dét som gjør den til en måling.
+          last_seen_at: stempel,
+          values: Object.fromEntries(serie.map((p) => [p.tidUtc, p.verdi])),
+          daily_max: bane.maks,
+          time_of_max_utc: bane.maksTidUtc,
+          unit: "celsius",
+        });
+      }
     }
 
     // ── prisene ────────────────────────────────────────────────────────────
@@ -261,14 +371,17 @@ export async function hentRunde(opt: HentOpsjoner, r: RundeOpsjoner): Promise<Ru
       }
     }
 
-    return { prognoser, priser,
-             notat: { by: by.slug, type, modeller: antallModeller, bøtter: antallBøtter, marked },
-             del: { by: by.slug, type, målDato: r.iso, fullt: fulltMarked, verdier: modellverdier } };
+    return { prognoser, priser, kjøringer,
+             notat: { by: by.slug, type, modeller: antallModeller, bøtter: antallBøtter,
+                      marked, baner: kjøringer.length },
+             del: { by: by.slug, type, målDato: r.iso, fullt: fulltMarked,
+                    verdier: modellverdier, baner } };
   });
 
   return {
     prognoser: deler.flatMap((d) => d.prognoser),
     priser: deler.flatMap((d) => d.priser),
+    kjøringer: deler.flatMap((d) => d.kjøringer),
     notater: deler.map((d) => d.notat),
     markeder: deler.map((d) => d.del),
   };
@@ -281,4 +394,8 @@ function tomtMarked(d: unknown): boolean {
 function tomPrognose(d: unknown): boolean {
   const daily = (d as { daily?: Record<string, unknown> } | null)?.daily;
   return !daily || Object.keys(daily).length <= 1;   // bare `time`
+}
+function tomTimesbane(d: unknown): boolean {
+  const hourly = (d as { hourly?: Record<string, unknown> } | null)?.hourly;
+  return !hourly || Object.keys(hourly).length <= 1;   // bare `time`
 }

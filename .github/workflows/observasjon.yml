@@ -1,0 +1,90 @@
+name: Observasjoner — METAR fra oppgjørsstasjonen
+
+# S1.1. Henter METAR fra London City Airport og skriver dem til
+# `temptrader.observations`.
+#
+# ── HVORFOR DENNE JOBBEN HASTER MER ENN DE ANDRE ─────────────────────────────
+#
+# Ingen tjeneste kan gi dette i ettertid. IEMs arkiv serverer gamle rapporter,
+# men det svarer på «hva ble målt» — ikke på «hva VISSTE vi klokka 13:42». Den
+# forskjellen er hele grunnlaget for å måle om observasjonsmomentum har en
+# kant på et highest-marked, der maksimum settes mens vi ser på.
+#
+# Hver time uten denne loggen er en time som ikke kan gjenskapes.
+#
+# ── ⚠ DENNE JOBBEN HØRER HJEMME I DET ÅPNE INNSAMLER-REPOET ──────────────────
+#
+# `docs/DELING.md` regner det ut: det private repoet bruker allerede ~222
+# kjøringer i døgnet mot et gratistak som holder i under fem dager, og
+# 6. august stanset alt. En jobb som går hvert femte minutt i dagslys er
+# ~150 kjøringer til. Offentlige repo har ubegrensede Actions-minutter.
+#
+# Filene den trenger står i `docs/apent-repo/OPPSKRIFT.md` trinn 2.
+# `runtime/test/deling.test.ts` følger importgrafen herfra og feiler hvis noe
+# fra beslutningslaget sniker seg inn.
+#
+# Til den er flyttet, står cronen under BEVISST GLISEN — se kommentaren der.
+
+on:
+  schedule:
+    # ── RESERVE, IKKE HOVEDKADENS ─────────────────────────────────────────
+    #
+    # Målet er hvert femte minutt i dagslys (08–20 Europe/London), og det kan
+    # GitHubs cron ikke levere: taket ligger på repoet, ikke på filen, og
+    # målingen i K4 viste ~én planlagt kjøring i timen til HELE repoet uansett
+    # hvor mange tidspunkt filene ber om.
+    #
+    # Frekvensen drives derfor utenfra: cron-job.org pirker
+    # /api/snapshot-trigger?jobb=observasjon, som gjør workflow_dispatch. En
+    # dispatch er ikke en planlagt kjøring og rammes ikke av taket.
+    #
+    # ÉN linje her, ikke tolv. Flere cron-linjer ville ikke gitt flere
+    # kjøringer — de ville tatt plass fra snapshot-loggen, der en tapt time
+    # heller ikke kan hentes inn igjen.
+    #
+    # Minutt 33: unna hel og halv time, og unna de fire andre reservene
+    # (london low 17 · snapshot 22 · parallell 38 · london high 47).
+    - cron: "33 * * * *"
+  workflow_dispatch: {}
+
+# INGEN `contents: write`. Denne jobben committer ingenting — den skriver bare
+# til Postgres. Se kommentaren i runtime/observasjon-logg.ts: en commit hvert
+# femte minutt ville brukt opp Vercels utrullingskvote på et døgn, som er
+# nøyaktig felle K8 i docs/BACKLOG.md.
+permissions:
+  contents: read
+
+concurrency:
+  group: observasjon
+  cancel-in-progress: false
+
+jobs:
+  hent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Hent og lagre observasjonene
+        # Uten nøkler skriver jobben INGENTING og avslutter rødt. Det er et
+        # bevisst brudd med de andre loggerne, som skriver fil først: denne har
+        # ingen fil-reserve, fordi en commit per kjøring koster mer enn dataene
+        # er verdt. En manglende nøkkel skal da være synlig, ikke stille.
+        # ── DETTE REPOET HAR INGEN DATABASENØKKEL ────────────────────────
+        #
+        # Radene sendes til `/api/snapshot-trigger`, som holder databasenøkkelen
+        # i Vercels servermiljø og validerer hver rad mot skjemaet før den
+        # skriver. Dette repoet har bare en tilfeldig hemmelighet, og den kan
+        # ikke brukes til noe annet enn å legge til rader i de hvitlistede
+        # tabellene.
+        #
+        # Samme oppsett som `snapshot-logg.yml`, og av samme grunn: dette repoet
+        # er OFFENTLIG. En service_role-nøkkel i secrets her ville vært én
+        # feilkonfigurert arbeidsflyt unna å kunne leses ut.
+        env:
+          SNAPSHOT_PROXY_URL: ${{ secrets.SNAPSHOT_PROXY_URL }}
+          SNAPSHOT_PROXY_SECRET: ${{ secrets.SNAPSHOT_PROXY_SECRET }}
+        run: node --experimental-strip-types runtime/observasjon-logg.ts

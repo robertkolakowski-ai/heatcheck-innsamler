@@ -23,30 +23,58 @@ export interface By {
   readonly navn: string;
   readonly lat: number;
   readonly lon: number;
+  /**
+   * ICAO-koden til oppgjørsstasjonen — nøkkelen METAR slås opp på.
+   *
+   * Koordinatene over og denne koden beskriver SAMME flyplass, og det er
+   * meningen: prognosen hentes på koordinatene, observasjonen på koden.
+   * Skiller de to lag, modellerer vi ett sted og måler et annet.
+   */
+  readonly icao: string;
+  /**
+   * Sonen stasjonens kalenderdøgn regnes i.
+   *
+   * Markedet gjøres opp på stasjonens LOKALE dag. For London betyr det
+   * UTC om vinteren og UTC+1 om sommeren, og grensen flytter seg to ganger i
+   * året — se `metar.ts:dagsmaks`.
+   */
+  readonly sone: string;
 }
 
+/**
+ * ── HVOR ICAO OG SONE KOM FRA ─────────────────────────────────────────────
+ *
+ * `Weathermarket/daily_prediction_log.py` har hatt en `STATIONS`-tabell med de
+ * samme 21 stasjonene siden den ble skrevet. Den var den eneste kopien, og den
+ * lå i Python — utenfor rekkevidde for alt annet i repoet.
+ *
+ * De er flyttet hit av nøyaktig samme grunn som koordinatene ble det:
+ * `core/test/byer.test.ts` klipper nå BEGGE kildene ut — `CITIES` fra
+ * `temp-bets.html` og `STATIONS` fra Python-loggeren — og sammenlikner felt
+ * for felt. Tre kopier som ikke kan gli fra hverandre slår tre kopier som kan.
+ */
 export const BYER: readonly By[] = [
-  { slug: "nyc",          navn: "New York (LaGuardia)", lat: 40.7769,  lon: -73.8740 },
-  { slug: "chicago",      navn: "Chicago (O'Hare)",     lat: 41.9742,  lon: -87.9073 },
-  { slug: "los-angeles",  navn: "Los Angeles (LAX)",    lat: 33.9416,  lon: -118.4085 },
-  { slug: "dallas",       navn: "Dallas (Love Field)",  lat: 32.8471,  lon: -96.8518 },
-  { slug: "seattle",      navn: "Seattle (Sea-Tac)",    lat: 47.4502,  lon: -122.3088 },
-  { slug: "toronto",      navn: "Toronto (Pearson)",    lat: 43.6777,  lon: -79.6248 },
-  { slug: "london",       navn: "London (City)",        lat: 51.5048,  lon: 0.0495 },
-  { slug: "paris",        navn: "Paris (Le Bourget)",   lat: 48.9694,  lon: 2.4414 },
-  { slug: "amsterdam",    navn: "Amsterdam (Schiphol)", lat: 52.3105,  lon: 4.7683 },
-  { slug: "madrid",       navn: "Madrid (Barajas)",     lat: 40.4936,  lon: -3.5668 },
-  { slug: "munich",       navn: "Munich",               lat: 48.3538,  lon: 11.7861 },
-  { slug: "tokyo",        navn: "Tokyo (Haneda)",       lat: 35.5494,  lon: 139.7798 },
-  { slug: "seoul",        navn: "Seoul (Incheon)",      lat: 37.4602,  lon: 126.4407 },
-  { slug: "beijing",      navn: "Beijing (Capital)",    lat: 40.0801,  lon: 116.5846 },
-  { slug: "shanghai",     navn: "Shanghai (Pudong)",    lat: 31.1443,  lon: 121.8083 },
-  { slug: "guangzhou",    navn: "Guangzhou (Baiyun)",   lat: 23.3924,  lon: 113.2988 },
-  { slug: "shenzhen",     navn: "Shenzhen (Bao'an)",    lat: 22.6393,  lon: 113.8107 },
-  { slug: "chengdu",      navn: "Chengdu (Shuangliu)",  lat: 30.5785,  lon: 103.9471 },
-  { slug: "singapore",    navn: "Singapore (Changi)",   lat: 1.3644,   lon: 103.9915 },
-  { slug: "taipei",       navn: "Taipei (Songshan)",    lat: 25.0694,  lon: 121.5525 },
-  { slug: "kuala-lumpur", navn: "Kuala Lumpur (KLIA)",  lat: 2.7456,   lon: 101.7099 },
+  { slug: "nyc",          navn: "New York (LaGuardia)", lat: 40.7769,  lon: -73.8740,  icao: "LGA",  sone: "America/New_York" },
+  { slug: "chicago",      navn: "Chicago (O'Hare)",     lat: 41.9742,  lon: -87.9073,  icao: "ORD",  sone: "America/Chicago" },
+  { slug: "los-angeles",  navn: "Los Angeles (LAX)",    lat: 33.9416,  lon: -118.4085, icao: "LAX",  sone: "America/Los_Angeles" },
+  { slug: "dallas",       navn: "Dallas (Love Field)",  lat: 32.8471,  lon: -96.8518,  icao: "DAL",  sone: "America/Chicago" },
+  { slug: "seattle",      navn: "Seattle (Sea-Tac)",    lat: 47.4502,  lon: -122.3088, icao: "SEA",  sone: "America/Los_Angeles" },
+  { slug: "toronto",      navn: "Toronto (Pearson)",    lat: 43.6777,  lon: -79.6248,  icao: "CYYZ", sone: "America/Toronto" },
+  { slug: "london",       navn: "London (City)",        lat: 51.5048,  lon: 0.0495,    icao: "EGLC", sone: "Europe/London" },
+  { slug: "paris",        navn: "Paris (Le Bourget)",   lat: 48.9694,  lon: 2.4414,    icao: "LFPB", sone: "Europe/Paris" },
+  { slug: "amsterdam",    navn: "Amsterdam (Schiphol)", lat: 52.3105,  lon: 4.7683,    icao: "EHAM", sone: "Europe/Amsterdam" },
+  { slug: "madrid",       navn: "Madrid (Barajas)",     lat: 40.4936,  lon: -3.5668,   icao: "LEMD", sone: "Europe/Madrid" },
+  { slug: "munich",       navn: "Munich",               lat: 48.3538,  lon: 11.7861,   icao: "EDDM", sone: "Europe/Berlin" },
+  { slug: "tokyo",        navn: "Tokyo (Haneda)",       lat: 35.5494,  lon: 139.7798,  icao: "RJTT", sone: "Asia/Tokyo" },
+  { slug: "seoul",        navn: "Seoul (Incheon)",      lat: 37.4602,  lon: 126.4407,  icao: "RKSI", sone: "Asia/Seoul" },
+  { slug: "beijing",      navn: "Beijing (Capital)",    lat: 40.0801,  lon: 116.5846,  icao: "ZBAA", sone: "Asia/Shanghai" },
+  { slug: "shanghai",     navn: "Shanghai (Pudong)",    lat: 31.1443,  lon: 121.8083,  icao: "ZSPD", sone: "Asia/Shanghai" },
+  { slug: "guangzhou",    navn: "Guangzhou (Baiyun)",   lat: 23.3924,  lon: 113.2988,  icao: "ZGGG", sone: "Asia/Shanghai" },
+  { slug: "shenzhen",     navn: "Shenzhen (Bao'an)",    lat: 22.6393,  lon: 113.8107,  icao: "ZGSZ", sone: "Asia/Shanghai" },
+  { slug: "chengdu",      navn: "Chengdu (Shuangliu)",  lat: 30.5785,  lon: 103.9471,  icao: "ZUUU", sone: "Asia/Shanghai" },
+  { slug: "singapore",    navn: "Singapore (Changi)",   lat: 1.3644,   lon: 103.9915,  icao: "WSSS", sone: "Asia/Singapore" },
+  { slug: "taipei",       navn: "Taipei (Songshan)",    lat: 25.0694,  lon: 121.5525,  icao: "RCSS", sone: "Asia/Taipei" },
+  { slug: "kuala-lumpur", navn: "Kuala Lumpur (KLIA)",  lat: 2.7456,   lon: 101.7099,  icao: "WMKK", sone: "Asia/Kuala_Lumpur" },
 ];
 
 /**

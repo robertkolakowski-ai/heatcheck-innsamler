@@ -118,6 +118,64 @@ export async function hentJson(
   erTomt: (data: unknown) => boolean = () => false,
   buffer?: Buffer,
 ): Promise<Svar<unknown>> {
+  return hentMed(url, opt, {
+    accept: "application/json",
+    les: (r) => r.json(),
+    // Et ødelagt svar blir ikke helt av å spørre igjen.
+    feilnavn: "ugyldig JSON",
+  }, erTomt, buffer);
+}
+
+/**
+ * Hent ren tekst med retry. Samme regler som `hentJson`, samme tre utfall.
+ *
+ * ── Hvorfor den finnes ────────────────────────────────────────────────────
+ *
+ * IEMs METAR-endepunkt svarer med CSV, ikke JSON. Uten denne ville
+ * observasjonshentingen enten fått sin egen retry-løkke — altså kopi nummer to
+ * av `Retry-After`, backoff, tidsavbrudd og tredelt utfall — eller måttet
+ * misbruke `hentJson` på et svar som ikke er JSON.
+ *
+ * Begge deler har denne kodebasen gjort før og angret på. Løkka er derfor
+ * trukket ut i `hentMed`, og de to inngangene skiller seg i nøyaktig to ting:
+ * hvilken `Accept` som sendes, og hvordan kroppen leses.
+ */
+export async function hentTekst(
+  url: string,
+  opt: HentOpsjoner,
+  erTomt: (tekst: string) => boolean = () => false,
+  buffer?: Buffer,
+): Promise<Svar<string>> {
+  return hentMed(url, opt, {
+    accept: "text/plain",
+    les: async (r) => {
+      if (!r.text) throw new Error("fetcheren støtter ikke text()");
+      return r.text();
+    },
+    feilnavn: "ulesbar kropp",
+  }, erTomt as (d: unknown) => boolean, buffer) as Promise<Svar<string>>;
+}
+
+interface Kroppsleser {
+  readonly accept: string;
+  readonly les: (r: Awaited<ReturnType<Fetcher>>) => Promise<unknown>;
+  readonly feilnavn: string;
+}
+
+/**
+ * Retry-løkka, delt av `hentJson` og `hentTekst`.
+ *
+ * Alt som gjorde `hentJson` verdt å ha ligger her: eksponentiell backoff,
+ * `Retry-After` fra tjenesten, tidsavbrudd, buffer med levetid, og skillet
+ * mellom `ok`, `tomt` og `feil`. Den delen skal finnes én gang.
+ */
+async function hentMed(
+  url: string,
+  opt: HentOpsjoner,
+  leser: Kroppsleser,
+  erTomt: (data: unknown) => boolean,
+  buffer?: Buffer,
+): Promise<Svar<unknown>> {
   const forsøk = opt.forsøk ?? STANDARD.forsøk;
   const timeoutMs = opt.timeoutMs ?? STANDARD.timeoutMs;
   const bufferMs = opt.bufferMs ?? STANDARD.bufferMs;
@@ -139,7 +197,7 @@ export async function hentJson(
     let retryAfter: string | null = null;
     try {
       const r = await opt.fetcher(url, {
-        headers: { "User-Agent": UA, Accept: "application/json" },
+        headers: { "User-Agent": UA, Accept: leser.accept },
         signal: AbortSignal.timeout(timeoutMs),
       });
       status = r.status;
@@ -147,9 +205,9 @@ export async function hentJson(
       if (r.ok) {
         let data: unknown;
         try {
-          data = await r.json();
+          data = await leser.les(r);
         } catch (e) {
-          grunn = `ugyldig JSON: ${(e as Error).message}`;
+          grunn = `${leser.feilnavn}: ${(e as Error).message}`;
           break;   // et ødelagt svar blir ikke helt av å spørre igjen
         }
         if (buffer && bufferMs > 0) buffer.sett(url, data, opt.nåMs);
