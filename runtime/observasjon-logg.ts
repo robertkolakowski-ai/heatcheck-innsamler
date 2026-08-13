@@ -63,6 +63,52 @@ import type { HentOpsjoner } from "./hent.ts";
  */
 export const FULGTE_BYER: readonly string[] = ["london"];
 
+/**
+ * Minutter etter hel time der BEGGE kilder spørres.
+ *
+ * ── HVORFOR DENNE FINNES ──────────────────────────────────────────────────
+ *
+ * `source` står i uniknøkkelen for at to kilder skal kunne være uenige om
+ * samme observasjon og BLI STÅENDE uenige. Den egenskapen var uten innhold
+ * fram til nå: hentingen stopper på første kilde som svarer, AWC svarer
+ * praktisk talt alltid, og da inneholder tabellen bare `awc`-rader. En
+ * uenighet det ikke finnes to rader å være uenig om, er ikke en uenighet
+ * som blir stående — den blir aldri målt.
+ *
+ * Målt i første produksjonskjøring 13. august: AWC ga 6 rapporter, IEM ble
+ * aldri spurt.
+ *
+ * ── HVORFOR ET KLOKKEVINDU OG IKKE EN EGEN JOBB ───────────────────────────
+ *
+ * Alternativet var en egen arbeidsflyt på timesplan. Den ville hvilt på
+ * GitHubs cron, og K4 i `docs/BACKLOG.md` målte at et travelt repo får rundt
+ * ÉN planlagt kjøring i timen uansett hvor mange tidspunkt filene ber om.
+ * Kryssjekken ville da konkurrert med reserven om den ene kjøringen.
+ *
+ * Vinduet arver i stedet kadensen som allerede finnes: pollen går hvert
+ * femte minutt, så nøyaktig én runde i timen lander i de fem første
+ * minuttene. Ingen ny jobb, ingen ny avhengighet til en scheduler vi har
+ * målt at ikke leverer, og ingen kadens å holde synkronisert to steder.
+ *
+ * Fem minutter og ikke ett: cron-jobben ligger forskjøvet på :02 for å unngå
+ * de andre jobbene, og et vindu på ett minutt ville bommet på hver eneste
+ * runde. Bommer den likevel en time, koster det den timens kryssjekk — ikke
+ * innsamlingen.
+ */
+export const KRYSSVINDU_MIN = 5;
+
+/**
+ * Skal denne runden spørre begge kilder?
+ *
+ * Ren, og tar tiden inn — ellers ville den vært umulig å teste uten å vente
+ * på riktig minutt. Minuttet leses i UTC: vinduet skal ligge på samme sted
+ * hele året, og et lokalt minutt-over-hel flytter seg ikke ved sommertid,
+ * men det gjør resonnementet om det.
+ */
+export function kryssrunde(nåMs: number, vinduMin = KRYSSVINDU_MIN): boolean {
+  return new Date(nåMs).getUTCMinutes() < vinduMin;
+}
+
 /** Gjør avlesninger om til rader. Ren — tidsstemplet sendes inn. */
 export function tilRader(
   avlesninger: readonly Avlesning[],
@@ -110,8 +156,16 @@ export function utenDubletter(rader: readonly ObsSnapshot[]): ObsSnapshot[] {
 
 async function main(): Promise<void> {
   const tørr = process.argv.includes("--tørr");
-  const alle = process.argv.includes("--alle-kilder");
+  const tvunget = process.argv.includes("--alle-kilder");
   const nåMs = Date.now();
+  // Kryssrunden er automatisk, og da MÅ den si fra om seg selv. En jobb som
+  // stille oppfører seg annerledes hver tolvte kjøring er en jobb ingen tror
+  // på når loggen en gang viser noe uventet.
+  const kryss = kryssrunde(nåMs);
+  const alle = tvunget || kryss;
+  if (alle) {
+    console.log(`[obs] begge kilder spørres denne runden — ${tvunget ? "--alle-kilder" : `kryssrunde (minutt < ${KRYSSVINDU_MIN})`}`);
+  }
   const hentetISO = new Date(nåMs).toISOString();
 
   const opt: HentOpsjoner = {

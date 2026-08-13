@@ -232,8 +232,22 @@ export async function hentFra(
  * for å få det samme svaret to ganger.
  *
  * `alle: true` spør begge likevel, og DET er modusen som svarer på om kildene
- * er enige. Den hører hjemme i en måling, ikke i den løpende innsamlingen —
- * se `tools/observasjon-check.mjs`.
+ * er enige.
+ *
+ * ── RETTELSE, 13. AUGUST ──────────────────────────────────────────────────
+ *
+ * Her sto det at den modusen «hører hjemme i en måling, ikke i den løpende
+ * innsamlingen — se tools/observasjon-check.mjs». Det var en plan som ikke
+ * kunne virke, og første produksjonskjøring viste det: sjekkverktøyet leser
+ * fra `observations`, og tabellen får bare `awc`-rader så lenge primærkilden
+ * svarer. Målingen hadde ingenting å måle på.
+ *
+ * Innsamlingen er derfor det eneste stedet krysningen KAN oppstå. Én runde i
+ * timen spør begge — se `kryssrunde()` i `observasjon-logg.ts`.
+ *
+ * At funksjonen aldri kaster er det som gjør dette trygt: en reserve som er
+ * nede under en kryssrunde blir en `feil`-linje i loggen, ikke en rød jobb
+ * og ikke en tapt primærinnsamling.
  */
 export async function hentObservasjoner(
   icao: string,
