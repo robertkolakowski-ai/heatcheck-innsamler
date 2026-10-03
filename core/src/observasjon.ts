@@ -88,6 +88,34 @@ export const HIRES = {
   icon_d2: "ICON-D2",
   knmi_harmonie_arome_europe: "KNMI HARMONIE",
   dmi_harmonie_arome_europe: "DMI HARMONIE",
+  /*
+   * ── MET NORDIC (yr) — LAGT TIL 3. OKTOBER 2026 ────────────────────────
+   *
+   * Eieren: «kan du ta inn yr fra open meteo». `metno_seamless` er MET
+   * Norways modell slik Open-Meteo eksponerer den — den samme yr.no viser.
+   *
+   * I HIRES og ikke i ENSEMBLE: dette settet LOGGES uten å stemme. En modell
+   * som flyttes rett inn i ensemblet endrer beslutningen fra første natt, på
+   * en modell ingen har målt ennå.
+   *
+   * ── DENNE KOPIEN ER DEN SOM FAKTISK GIR DEN EN KOLONNE ────────────────
+   *
+   * Modellen ble lagt til i handelsrepoets liste 2. oktober, og det var ikke
+   * nok. `snapshot-logg.ts` kjører `--bare-fil` der, og dagsfila bærer bare
+   * samletall — ensemblets median og hires-medianen, ikke verdien per modell.
+   * Det er DETTE repoet som kjører `--bare-base` og skriver per-modell-radene
+   * til `forecast_snapshots`, og det er de radene `/london-stats` bygger
+   * kolonnene sine av.
+   *
+   * De to listene må altså endres SAMMEN. Endres bare den ene, hentes
+   * modellen uten å bli målt — eller måles ikke i det hele tatt.
+   *
+   * ⚠ DEKNINGEN ER IKKE VERIFISERT. MET Nordic er et nordisk domene, og om
+   * Open-Meteo svarer med tall for London er et åpent spørsmål. Svaret kommer
+   * i første runde etter utrulling: kilden får en kolonne med verdier, eller
+   * den uteblir.
+   */
+  metno_seamless: "MET Nordic (yr)",
 } as const;
 
 export type EnsembleNøkkel = keyof typeof ENSEMBLE;
